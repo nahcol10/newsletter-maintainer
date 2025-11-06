@@ -1,0 +1,14 @@
+.vscode/
+.venv/
+.env
+.DS_Store
+.cursor/
+__pycache__/
+processors/__pycache__/
+email_processing/__pycache__/
+tests/__pycache__/__pycache__/
+processors/__pycache__/
+email_processing/__pycache__/
+tests/__pycache__/
+logs/
+data/
