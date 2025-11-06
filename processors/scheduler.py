@@ -115,48 +115,61 @@ class NewsletterScheduler:
             print(f"❌ Weekly job error: {e}")
 
     def _create_digest_data_for_notion(self, digest_path):
-        """Create proper digest data for Notion publishing by reading JSON metadata"""
+        """Create proper digest data for Notion publishing by reading JSON metadata and markdown content"""
         try:
             # Check if JSON metadata file exists
             json_path = digest_path.replace(".md", ".json")
-
             if os.path.exists(json_path):
                 # Load structured metadata from JSON file
                 print(f"📄 Loading digest metadata from {json_path}")
                 with open(json_path, "r", encoding="utf-8") as f:
                     metadata = json.load(f)
 
-                # Read the markdown content for unified summary
+                # Read the markdown content
                 with open(digest_path, "r", encoding="utf-8") as f:
                     digest_content = f.read()
 
-                # Extract a unified summary from the digest content
-                # Look for the main introduction paragraph after the title
-
-                # Try to extract the first substantial paragraph as unified summary
-                paragraphs = re.split(r"\n\n+", digest_content)
+                # Extract unified summary - look for content between title and first genre section
                 unified_summary = ""
-
-                for para in paragraphs:
-                    # Skip metadata header, titles, and short lines
-                    if (
-                        para.strip()
-                        and not para.startswith("---")
-                        and not para.startswith("#")
-                        and len(para.strip()) > 100
-                    ):
-                        unified_summary = para.strip()
-                        break
+                # Split content into sections
+                sections = re.split(r"\n##\s+", digest_content, maxsplit=2)
+                if len(sections) > 1:
+                    intro_section = sections[1]  # Content after the main title
+                    # Remove any headers or metadata
+                    intro_section = re.sub(
+                        r"^#.*$", "", intro_section, flags=re.MULTILINE
+                    )
+                    intro_section = re.sub(
+                        r"^---.*?---\s*", "", intro_section, flags=re.DOTALL
+                    )
+                    # Get paragraphs
+                    paragraphs = [
+                        p.strip()
+                        for p in intro_section.split("\n\n")
+                        if p.strip() and len(p.strip()) > 100
+                    ]
+                    if paragraphs:
+                        unified_summary = paragraphs[0]
 
                 if not unified_summary:
-                    unified_summary = "Weekly newsletter digest with key insights across multiple domains."
+                    # Fallback: take first substantial paragraph from entire content
+                    paragraphs = [
+                        p.strip()
+                        for p in digest_content.split("\n\n")
+                        if p.strip() and len(p.strip()) > 150
+                    ]
+                    unified_summary = (
+                        paragraphs[0]
+                        if paragraphs
+                        else "Weekly newsletter digest with key insights across multiple domains."
+                    )
 
                 # Create genre_summaries from metadata and markdown content
                 genre_summaries = {}
                 for genre, genre_data in metadata.get("genres", {}).items():
-                    # Try to extract genre-specific summary from markdown
+                    # More flexible pattern to match genre sections
                     genre_pattern = (
-                        rf"###\s+{re.escape(genre)}[:\s]+(.*?)(?=\n###|\n---|\Z)"
+                        rf"###\s+{re.escape(genre)}\b.*?\n+(.*?)(?=\n###\s+|\Z)"
                     )
                     genre_match = re.search(
                         genre_pattern, digest_content, re.DOTALL | re.IGNORECASE
@@ -164,17 +177,31 @@ class NewsletterScheduler:
 
                     genre_summary = "Key insights from this week's newsletters."
                     if genre_match:
-                        # Get first paragraph of the genre section
+                        # Get the full content of the genre section
                         genre_text = genre_match.group(1).strip()
-                        genre_paragraphs = re.split(r"\n\n+", genre_text)
-                        for gpara in genre_paragraphs:
-                            if (
-                                gpara.strip()
-                                and not gpara.startswith("#")
-                                and len(gpara.strip()) > 50
-                            ):
-                                genre_summary = gpara.strip()
-                                break
+                        # Remove any sub-headers, images, or markdown formatting
+                        genre_text = re.sub(
+                            r"#+\s+.*$", "", genre_text, flags=re.MULTILINE
+                        )
+                        genre_text = re.sub(
+                            r"!\[.*?\]\(.*?\)", "", genre_text
+                        )  # Remove images
+                        genre_text = re.sub(
+                            r"\[.*?\]\(.*?\)", "", genre_text
+                        )  # Remove links
+                        genre_text = re.sub(
+                            r"\*\*|\*|_|`", "", genre_text
+                        )  # Remove formatting
+
+                        # Get substantial paragraphs
+                        paragraphs = [
+                            p.strip()
+                            for p in genre_text.split("\n\n")
+                            if p.strip() and len(p.strip()) > 80
+                        ]
+                        if paragraphs:
+                            # Combine first few substantial paragraphs for a comprehensive summary
+                            genre_summary = " ".join(paragraphs[:2])
 
                     genre_summaries[genre] = {
                         "summary": genre_summary[
@@ -196,9 +223,8 @@ class NewsletterScheduler:
                 # Fallback: Try to parse markdown (legacy support)
                 print(f"⚠️ No JSON metadata found, attempting to parse markdown file")
                 return self._parse_markdown_digest(digest_path)
-
         except Exception as e:
-            print(f"❌ Error creating digest data: {e}")
+            print(f"❌ Error creating digest data for Notion: {e}")
             import traceback
 
             traceback.print_exc()
@@ -206,7 +232,7 @@ class NewsletterScheduler:
             return self._get_fallback_digest_data()
 
     def _parse_markdown_digest(self, digest_path):
-        """Legacy method to parse markdown digest file"""
+        """Improved method to parse markdown digest file when JSON metadata is not available"""
         try:
             with open(digest_path, "r", encoding="utf-8") as f:
                 digest_content = f.read()
@@ -215,74 +241,102 @@ class NewsletterScheduler:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=7)
 
-            # Try to extract week range from metadata or content
-            week_start = start_date
-            week_end = end_date
-
-            # Extract genres from headings (### Technology, etc.)
-            genre_pattern = r"###\s+(.+?)[:\.]\s+"
-            genre_matches = re.findall(genre_pattern, digest_content)
+            # Extract genres from headings
+            genre_matches = re.findall(
+                r"###\s+(.*?)(?:\n|$)", digest_content, re.IGNORECASE
+            )
+            if not genre_matches:
+                genre_matches = re.findall(
+                    r"##\s+(.*?)(?:\n|$)", digest_content, re.IGNORECASE
+                )
 
             genre_summaries = {}
             total_newsletters = 0
 
             for genre in set(genre_matches):  # Remove duplicates
                 genre = genre.strip()
-                # Try to extract content for this genre
-                genre_section_pattern = (
-                    rf"###\s+{re.escape(genre)}[:\s]+(.*?)(?=\n###|\n---|\Z)"
+                if (
+                    not genre
+                    or len(genre) < 2
+                    or "date range" in genre.lower()
+                    or "conclusion" in genre.lower().lower()
+                ):
+                    continue
+
+                # More flexible pattern to extract genre content
+                genre_pattern = (
+                    rf"###\s+{re.escape(genre)}\b.*?\n+(.*?)(?=\n###\s+|\n##\s+|\Z)"
                 )
-                section_match = re.search(
-                    genre_section_pattern, digest_content, re.DOTALL | re.IGNORECASE
+                genre_match = re.search(
+                    genre_pattern, digest_content, re.DOTALL | re.IGNORECASE
                 )
 
-                if section_match:
-                    section_text = section_match.group(1).strip()
-                    # Take first paragraph as summary
-                    paragraphs = re.split(r"\n\n+", section_text)
-                    summary = ""
-                    for para in paragraphs:
-                        if para.strip() and len(para.strip()) > 50:
-                            summary = para.strip()
-                            break
+                if genre_match:
+                    genre_text = genre_match.group(1).strip()
+                    # Clean the text
+                    genre_text = re.sub(r"#+\s+.*$", "", genre_text, flags=re.MULTILINE)
+                    genre_text = re.sub(r"\*\*|\*|_|`", "", genre_text)
+                    paragraphs = [
+                        p.strip()
+                        for p in genre_text.split("\n\n")
+                        if p.strip() and len(p.strip()) > 80
+                    ]
 
-                    if summary:
+                    if paragraphs:
+                        summary = " ".join(
+                            paragraphs[:2]
+                        )  # Take first two substantial paragraphs
                         genre_summaries[genre] = {
                             "summary": summary[:2000],
                             "newsletters": [],
                         }
                         total_newsletters += 1
 
-            # Extract unified summary
-            paragraphs = re.split(r"\n\n+", digest_content)
+            # Extract unified summary - look for introduction paragraph
             unified_summary = ""
-            for para in paragraphs:
-                if (
-                    para.strip()
-                    and not para.startswith("---")
-                    and not para.startswith("#")
-                    and len(para.strip()) > 100
-                ):
-                    unified_summary = para.strip()
-                    break
+            sections = re.split(r"\n##\s+", digest_content, maxsplit=2)
+            if len(sections) > 1:
+                intro_section = sections[1]
+                intro_section = re.sub(r"^#.*$", "", intro_section, flags=re.MULTILINE)
+                intro_section = re.sub(
+                    r"^---.*?---\s*", "", intro_section, flags=re.DOTALL
+                )
+                paragraphs = [
+                    p.strip()
+                    for p in intro_section.split("\n\n")
+                    if p.strip() and len(p.strip()) > 150
+                ]
+                if paragraphs:
+                    unified_summary = paragraphs[0]
 
             if not unified_summary:
-                unified_summary = "Weekly newsletter digest with key insights across multiple domains."
+                paragraphs = [
+                    p.strip()
+                    for p in digest_content.split("\n\n")
+                    if p.strip() and len(p.strip()) > 200
+                ]
+                unified_summary = (
+                    paragraphs[0]
+                    if paragraphs
+                    else "Weekly newsletter digest with key insights across multiple domains."
+                )
 
             # If no data extracted, use fallback
             if not genre_summaries:
                 return self._get_fallback_digest_data()
 
             return {
-                "week_start": week_start.strftime("%Y-%m-%d"),
-                "week_end": week_end.strftime("%Y-%m-%d"),
+                "week_start": start_date.strftime("%Y-%m-%d"),
+                "week_end": end_date.strftime("%Y-%m-%d"),
                 "total_newsletters": max(total_newsletters, len(genre_summaries)),
                 "genre_summaries": genre_summaries,
                 "unified_summary": unified_summary[:2000],
             }
-
         except Exception as e:
-            print(f"❌ Error parsing markdown digest: {e}")
+            print(f"❌ Error parsing markdown digest for Notion: {e}")
+            import traceback
+
+            traceback.print_exc()
             return self._get_fallback_digest_data()
 
     def _get_fallback_digest_data(self):

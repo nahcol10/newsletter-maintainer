@@ -12,3 +12,4 @@ email_processing/__pycache__/
 tests/__pycache__/
 logs/
 data/
+notion_publisher.log

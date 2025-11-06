@@ -1,7 +1,7 @@
 # Configuration file for Newsletter Generation Engine
 
 # Model Configuration - Single source of truth for model switching
-DEFAULT_MODEL = "google/gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 # Alternative models (uncomment to switch)
 # DEFAULT_MODEL = "gpt-3.5-turbo"
@@ -55,7 +55,7 @@ WEEKLY_DIGEST_RETRY_INTERVAL = 300  # 5 minutes between retries (seconds)
 
 # Test Mode Configuration (set to True for faster testing)
 WEEKLY_DIGEST_TEST_MODE = True  # When True, uses shorter intervals for testing
-WEEKLY_DIGEST_TEST_GENRE_INTERVAL = 60  # 1 minute between genres in test mode
+WEEKLY_DIGEST_TEST_GENRE_INTERVAL = 30  # 1 minute between genres in test mode
 WEEKLY_DIGEST_TEST_RETRY_INTERVAL = 30  # 30 seconds between retries in test mode
 
 # Scheduler Configuration
