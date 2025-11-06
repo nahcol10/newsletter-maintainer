@@ -18,12 +18,11 @@ logger = logging.getLogger("NotionPublisher")
 
 
 class NotionPublisher:
-    """Publisher for weekly digests to Notion (integrated with scheduler)"""
+    """Publisher for weekly digests to Notion with enhanced validation"""
 
     def __init__(self):
         """Initialize Notion client and load environment variables"""
         load_dotenv()
-
         self.notion_token = os.getenv("NOTION_TOKEN")
         self.database_id = os.getenv("NOTION_DATABASE_ID")
 
@@ -84,33 +83,28 @@ class NotionPublisher:
         with open(md_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Find the main content body.
-        # We'll split the file by the frontmatter (---)
-        # and take everything after the second '---'.
-
-        main_content = content
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) > 2:
-                main_content = parts[2].strip()  # Get everything after the frontmatter
-
-        # Now, find the first H2 (##) and take everything *after* its title
-        unified_summary = main_content
-        if "\n## " in main_content:
-            # Get content after the first H2 header line
-            body_after_h2 = main_content.split("\n## ", 1)[1]
-            # Find the next newline to skip the header text itself
-            if "\n\n" in body_after_h2:
-                # Get the content *after* the header title line
-                unified_summary = body_after_h2.split("\n\n", 1)[1].strip()
-            else:
-                unified_summary = body_after_h2.strip()
+        # Extract unified summary from the main content
+        # Find the first substantial paragraph after the frontmatter
+        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
+        unified_summary = ""
+        for para in paragraphs:
+            if not para.startswith("---") and not para.startswith("#"):
+                if len(para) > 100:
+                    unified_summary = para
+                    break
 
         if not unified_summary:
-            unified_summary = "Could not parse digest content."
+            unified_summary = (
+                "Weekly newsletter digest with key insights across multiple domains."
+            )
 
-        # Get genre names from metadata just for the page properties
-        genre_keys = metadata.get("genres", {}).keys()
+        # Create genre_summaries from metadata
+        genre_summaries = {}
+        for genre, genre_data in metadata.get("genres", {}).items():
+            genre_summaries[genre] = {
+                "summary": genre_data.get("summary", ""),
+                "newsletters": genre_data.get("newsletters", []),
+            }
 
         # Build the digest data structure
         digest_data = {
@@ -119,19 +113,17 @@ class NotionPublisher:
             ),
             "week_end": metadata.get("week_end", datetime.now().strftime("%Y-%m-%d")),
             "total_newsletters": metadata.get("total_newsletters", 0),
-            # Pass genre names for properties, but no content
-            "genre_summaries": {genre: {} for genre in genre_keys},
-            # Pass the FULL, un-truncated content
+            "genre_summaries": genre_summaries,
             "unified_summary": unified_summary,
         }
 
         return digest_data
 
     def create_notion_blocks(self, digest_data: dict) -> list:
-        """Create validated Notion blocks from digest data"""
+        """Create validated Notion blocks from digest data with enhanced error handling"""
         blocks = []
 
-        # Add header
+        # 1. Add header
         blocks.append(
             {
                 "object": "block",
@@ -147,7 +139,7 @@ class NotionPublisher:
             }
         )
 
-        # Add week info
+        # 2. Add week info
         blocks.append(
             {
                 "object": "block",
@@ -165,7 +157,7 @@ class NotionPublisher:
             }
         )
 
-        # Add newsletter count
+        # 3. Add newsletter count
         blocks.append(
             {
                 "object": "block",
@@ -183,10 +175,10 @@ class NotionPublisher:
             }
         )
 
-        # Add divider
+        # 4. Add divider
         blocks.append({"object": "block", "type": "divider", "divider": {}})
 
-        # Add unified summary (which now contains the full article)
+        # 5. Add unified summary
         if digest_data.get("unified_summary"):
             blocks.append(
                 {
@@ -203,73 +195,134 @@ class NotionPublisher:
                 }
             )
 
-            # --- NEW: Markdown Parsing Logic ---
-            # Split content by paragraphs (double newline)
-            all_paragraphs = digest_data["unified_summary"].split("\n\n")
+            # Split long summaries into multiple paragraphs
+            paragraphs = self._split_long_text(digest_data["unified_summary"])
+            for para in paragraphs:
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"type": "text", "text": {"content": para}}]
+                        },
+                    }
+                )
 
-            for para in all_paragraphs:
-                para = para.strip()
-                if not para:
-                    continue
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
 
-                # Check for H3 (###)
-                if para.startswith("### "):
+        # 6. Add genre sections
+        if digest_data.get("genre_summaries"):
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {
+                        "rich_text": [
+                            {"type": "text", "text": {"content": "📑 By Genre"}}
+                        ]
+                    },
+                }
+            )
+
+            genre_list = list(digest_data["genre_summaries"].keys())
+
+            for i, genre in enumerate(genre_list):
+                genre_data = digest_data["genre_summaries"][genre]
+
+                # Genre header
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "heading_3",
+                        "heading_3": {
+                            "rich_text": [
+                                {
+                                    "type": "text",
+                                    "text": {
+                                        "content": f"{self._get_genre_emoji(genre)} {genre}"
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                )
+
+                # Newsletter count for this genre
+                newsletter_count = len(genre_data.get("newsletters", []))
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [
+                                {
+                                    "type": "text",
+                                    "text": {
+                                        "content": f"📈 {newsletter_count} newsletters processed"
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                )
+
+                # Genre summary
+                genre_summary = genre_data.get("summary", "")
+                if genre_summary:
+                    paragraphs = self._split_long_text(genre_summary)
+                    for para in paragraphs:
+                        blocks.append(
+                            {
+                                "object": "block",
+                                "type": "paragraph",
+                                "paragraph": {
+                                    "rich_text": [
+                                        {"type": "text", "text": {"content": para}}
+                                    ]
+                                },
+                            }
+                        )
+
+                # Add source newsletters
+                newsletters = genre_data.get("newsletters", [])
+                if newsletters:
                     blocks.append(
                         {
                             "object": "block",
                             "type": "heading_3",
                             "heading_3": {
-                                "rich_text": self._parse_inline_markdown(
-                                    para.lstrip("### ").strip()
-                                )
+                                "rich_text": [
+                                    {
+                                        "type": "text",
+                                        "text": {"content": "📚 Source Newsletters"},
+                                    }
+                                ]
                             },
                         }
                     )
-                # Check for H2 (##)
-                elif para.startswith("## "):
-                    blocks.append(
-                        {
-                            "object": "block",
-                            "type": "heading_2",
-                            "heading_2": {
-                                "rich_text": self._parse_inline_markdown(
-                                    para.lstrip("## ").strip()
-                                )
-                            },
-                        }
-                    )
-                # Check for bullets (* )
-                elif para.startswith("* "):
-                    blocks.append(
-                        {
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": self._parse_inline_markdown(
-                                    para.lstrip("* ").strip()
-                                )
-                            },
-                        }
-                    )
-                # Check for divider (---)
-                elif para.strip() == "---":
+
+                    for newsletter in newsletters[:5]:  # Limit to 5 per genre
+                        subject = newsletter.get("subject", "Unknown")
+                        from_email = newsletter.get("from", "Unknown")
+                        content = f"{subject} (from {from_email})"
+
+                        blocks.append(
+                            {
+                                "object": "block",
+                                "type": "bulleted_list_item",
+                                "bulleted_list_item": {
+                                    "rich_text": [
+                                        {"type": "text", "text": {"content": content}}
+                                    ]
+                                },
+                            }
+                        )
+
+                # Add divider between genres (except after the last one)
+                if i < len(genre_list) - 1:
                     blocks.append({"object": "block", "type": "divider", "divider": {}})
-                # Default: Paragraph
-                else:
-                    blocks.append(
-                        {
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {
-                                "rich_text": self._parse_inline_markdown(para)
-                            },
-                        }
-                    )
-            # --- END: Markdown Parsing Logic ---
 
-            blocks.append({"object": "block", "type": "divider", "divider": {}})
-
-        # Add footer
+        # 7. Add footer
         blocks.append(
             {
                 "object": "block",
@@ -287,7 +340,7 @@ class NotionPublisher:
             }
         )
 
-        # Validate blocks
+        # Validate all blocks before returning
         validated_blocks = []
         for i, block in enumerate(blocks):
             if self._validate_block(block, i):
@@ -297,111 +350,8 @@ class NotionPublisher:
 
         return validated_blocks
 
-    # --- NEW: Helper function to parse simple inline Markdown ---
-    def _parse_inline_markdown(self, text: str) -> list:
-        """
-        Parse simple inline Markdown (bold) into Notion rich_text array.
-        Example: "This is **bold** text"
-        """
-        parts = text.split("**")
-        rich_text_array = []
-        for i, part in enumerate(parts):
-            if not part:  # Skip empty strings (from e.g., **start bold**)
-                continue
-
-            # Parts at odd indices are bolded
-            is_bold = i % 2 == 1
-
-            rich_text_array.append(
-                {
-                    "type": "text",
-                    "text": {"content": part},
-                    "annotations": {"bold": is_bold},
-                }
-            )
-
-        # If no parts found (e.g., empty string), return empty text
-        if not rich_text_array:
-            return [{"type": "text", "text": {"content": ""}}]
-
-        return rich_text_array
-
-    def _validate_block(self, block: dict, index: int) -> bool:
-        """Validate that a block has proper structure for Notion API"""
-        try:
-            if "object" not in block or block["object"] != "block":
-                logger.error(
-                    f"❌ Block {index} missing 'object' property or invalid value"
-                )
-                return False
-
-            if "type" not in block:
-                logger.error(f"❌ Block {index} missing 'type' property")
-                return False
-
-            block_type = block["type"]
-            type_specific_key = block_type
-
-            # Special case mappings for Notion API
-            type_mappings = {
-                "bulleted_list_item": "bulleted_list_item",
-                "numbered_list_item": "numbered_list_item",
-                "to_do": "to_do",
-                "toggle": "toggle",
-                "quote": "quote",
-                "callout": "callout",
-            }
-
-            if block_type in type_mappings:
-                type_specific_key = type_mappings[block_type]
-
-            if type_specific_key not in block:
-                # 'divider' is a valid type that has no type_specific_key block
-                if block_type == "divider":
-                    return "divider" in block
-
-                logger.error(
-                    f"❌ Block {index} (type: {block_type}) missing '{type_specific_key}' property"
-                )
-                return False
-
-            # Validate rich_text content where applicable
-            content_fields = [
-                "heading_1",
-                "heading_2",
-                "heading_3",
-                "paragraph",
-                "bulleted_list_item",
-                "numbered_list_item",
-                "quote",
-                "to_do",
-                "toggle",
-                "callout",
-            ]
-
-            if block_type in content_fields:
-                content_field = block[type_specific_key]
-                if "rich_text" not in content_field or not content_field["rich_text"]:
-                    # This check is tricky now because _parse_inline_markdown
-                    # might return an empty list for an empty string.
-                    # We'll allow empty rich_text array for now.
-                    pass
-
-            # Handle divider case which passed the 'type_specific_key' check
-            if block_type == "divider":
-                return "divider" in block
-
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error validating block {index}: {e}")
-            return False
-
     def _split_long_text(self, text: str, max_length: int = 2000) -> list:
-        """
-        Split long text into paragraphs that respect Notion's limits.
-        NOTE: This is no longer used for the main content parsing but
-        kept in case it's needed elsewhere.
-        """
+        """Split long text into paragraphs that respect Notion's limits"""
         if not text:
             return []
 
@@ -431,6 +381,87 @@ class NotionPublisher:
                     result.append(current_chunk.strip())
 
         return result
+
+    def _validate_block(self, block: dict, index: int) -> bool:
+        """Validate that a block has proper structure for Notion API"""
+        try:
+            # Check required properties
+            if "object" not in block or block["object"] != "block":
+                logger.error(
+                    f"❌ Block {index} missing 'object' property or invalid value"
+                )
+                return False
+
+            if "type" not in block:
+                logger.error(f"❌ Block {index} missing 'type' property")
+                return False
+
+            block_type = block["type"]
+            type_specific_key = block_type
+
+            # Special case mappings for Notion API
+            type_mappings = {
+                "bulleted_list_item": "bulleted_list_item",
+                "numbered_list_item": "numbered_list_item",
+                "to_do": "to_do",
+                "toggle": "toggle",
+                "quote": "quote",
+                "callout": "callout",
+            }
+
+            if block_type in type_mappings:
+                type_specific_key = type_mappings[block_type]
+
+            if type_specific_key not in block:
+                logger.error(
+                    f"❌ Block {index} (type: {block_type}) missing '{type_specific_key}' property"
+                )
+                return False
+
+            # Validate rich_text content where applicable
+            content_fields = [
+                "heading_1",
+                "heading_2",
+                "heading_3",
+                "paragraph",
+                "bulleted_list_item",
+                "numbered_list_item",
+                "quote",
+                "to_do",
+                "toggle",
+                "callout",
+            ]
+
+            if block_type in content_fields:
+                content_field = block.get(type_specific_key, {})
+                if not isinstance(content_field, dict):
+                    logger.warning(
+                        f"⚠️ Block {index} (type: {block_type}) has invalid content field type"
+                    )
+                    return False
+
+                if "rich_text" not in content_field:
+                    logger.warning(
+                        f"⚠️ Block {index} (type: {block_type}) missing 'rich_text' property"
+                    )
+                    return False
+
+                rich_text = content_field.get("rich_text", [])
+                if not isinstance(rich_text, list):
+                    logger.warning(
+                        f"⚠️ Block {index} (type: {block_type}) has invalid rich_text array"
+                    )
+                    return False
+
+                if len(rich_text) == 0:
+                    logger.warning(
+                        f"⚠️ Block {index} (type: {block_type}) has empty rich_text array"
+                    )
+
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error validating block {index}: {e}")
+            return False
 
     def _get_genre_emoji(self, genre: str) -> str:
         """Get appropriate emoji for genre"""
@@ -462,8 +493,13 @@ class NotionPublisher:
         return emoji_map.get(genre, "📰")
 
     def publish_to_notion(self, digest_data: dict) -> str:
-        """Publish digest to Notion"""
+        """Publish digest to Notion with comprehensive validation"""
         try:
+            # Validate digest data
+            if not self._validate_digest_data(digest_data):
+                logger.error("❌ Digest data validation failed")
+                return None
+
             # Create page properties
             properties = {
                 "Name": {
@@ -493,6 +529,9 @@ class NotionPublisher:
 
             # Create page content blocks
             children = self.create_notion_blocks(digest_data)
+            if not children:
+                logger.error("❌ Failed to create valid blocks for Notion")
+                return None
 
             # Debug: Print block structure before sending
             self._log_block_structure(children)
@@ -515,7 +554,19 @@ class NotionPublisher:
             return None
         except Exception as e:
             logger.error(f"❌ Error publishing to Notion: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())
             return None
+
+    def _validate_digest_data(self, digest_data: dict) -> bool:
+        """Validate required digest data fields"""
+        required_fields = ["week_start", "week_end", "total_newsletters"]
+        for field in required_fields:
+            if field not in digest_data:
+                logger.error(f"❌ Missing required field: {field}")
+                return False
+        return True
 
     def _log_block_structure(self, children: list):
         """Log block structure for debugging"""
@@ -527,30 +578,28 @@ class NotionPublisher:
 
             # Try to get content preview for common block types
             try:
-                if block_type in [
-                    "paragraph",
-                    "heading_1",
-                    "heading_2",
-                    "heading_3",
-                ]:
+                if block_type in ["paragraph", "heading_1", "heading_2", "heading_3"]:
                     rich_text = block.get(block_type, {}).get("rich_text", [])
-                    if rich_text and isinstance(rich_text[0], dict):
-                        content_preview = (
-                            rich_text[0].get("text", {}).get("content", "")[:100]
-                        )
+                    if rich_text and isinstance(rich_text, list) and len(rich_text) > 0:
+                        first_rt = rich_text[0]
+                        if isinstance(first_rt, dict) and "text" in first_rt:
+                            text_content = first_rt["text"].get("content", "")
+                            content_preview = text_content[:100]
                 elif block_type == "bulleted_list_item":
                     rich_text = block.get("bulleted_list_item", {}).get("rich_text", [])
-                    if rich_text and isinstance(rich_text[0], dict):
-                        content_preview = (
-                            rich_text[0].get("text", {}).get("content", "")[:100]
-                        )
-            except Exception:
-                content_preview = "[error extracting content]"
+                    if rich_text and isinstance(rich_text, list) and len(rich_text) > 0:
+                        first_rt = rich_text[0]
+                        if isinstance(first_rt, dict) and "text" in first_rt:
+                            text_content = first_rt["text"].get("content", "")
+                            content_preview = text_content[:100]
+            except Exception as e:
+                content_preview = f"[error extracting content: {str(e)}]"
 
             logger.info(
                 f"Block {i}: type='{block_type}'"
                 + (f", content='{content_preview}...'" if content_preview else "")
             )
+        logger.info("")
 
     def test_connection(self) -> bool:
         """Test Notion connection"""
@@ -623,7 +672,6 @@ def main():
         # Publish to Notion
         logger.info("\n🚀 Publishing to Notion...")
         page_id = publisher.publish_to_notion(digest_data)
-
         if page_id:
             logger.info(
                 f"✅ Digest published successfully to Notion! Page ID: {page_id}"

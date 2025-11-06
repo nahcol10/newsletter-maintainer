@@ -81,3 +81,4 @@ zstandard
 beautifulsoup4
 html5lib
 python-dotenv
+google-genai
